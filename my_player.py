@@ -34,4 +34,78 @@ class MyPlayer(PlayerQuoridor):
         """
 
         #TODO
-        raise MethodNotImplementedError()
+        
+        value, action = self.max_value(current_state, float("-inf"), float("inf"), 3)
+        
+        
+        # raise MethodNotImplementedError()
+    
+        return action  
+    
+    
+    def evaluate(self, state: GameStateQuoridor) -> float:
+        if state.is_done():
+            if state.scores[self.id] > 0.5:
+                return float("inf")
+            else:
+                return float("-inf")
+            
+        me = None
+        opponent = None
+        
+        for player in state.players:
+            if player.id == self.id:
+                me = player
+            else:
+                opponent = player 
+        
+        my_distance = state._shortest_path(me)
+        opponent_distance = state._shortest_path(opponent)
+        return opponent_distance - my_distance
+    
+    def max_value(self, state: GameStateQuoridor, alpha: float, beta: float, depth):
+        if depth == 0 or state.is_done():
+            return self.evaluate(state), None
+        
+        best_value = float("-inf") # v*
+        best_action = None # m*
+        
+        actions = list(state._legal_moves())
+        
+        for action in actions:
+            next_state = state.apply_action(action) # s' = transition(state,action)
+            
+            value, _ = self.min_value(next_state, alpha, beta, depth - 1)
+            
+            if best_action == None or value > best_value:
+                best_value = value
+                best_action = action
+                alpha = max(alpha, best_value)
+                
+            if best_value >= beta:
+                return best_value, best_action
+
+        return best_value, best_action
+    
+    def min_value(self, state: GameStateQuoridor, alpha: float, beta: float, depth):
+        if depth == 0 or state.is_done():
+            return self.evaluate(state), None
+        
+        best_value = float("inf")
+        best_action = None
+        
+        actions = list(state._legal_moves())
+        
+        for action in actions:
+            next_state = state.apply_action(action)
+            
+            value, _ = self.max_value(next_state, alpha, beta, depth - 1)
+            
+            if best_action == None or value < best_value:
+                best_value = value
+                best_action = action
+                beta = min(beta, best_value)
+            if best_value <= alpha: 
+                return best_value, best_action
+                
+        return best_value, best_action
