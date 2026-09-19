@@ -85,7 +85,7 @@ class BoardQuoridor(Board):
         if horizontal:
             for wall in horizontal:
                 # lines.append(f"  ({wall.col+1}, {wall.row + 1})")
-                lines.append(f"  ({chr(ord("a") + wall.col)}, {wall.row + 1})")
+                lines.append(f"  ({chr(ord('a') + wall.col)}, {wall.row + 1})")
         else:
             lines.append("  (none)")
 
@@ -95,7 +95,7 @@ class BoardQuoridor(Board):
         if vertical:
             for wall in vertical:
                 # lines.append(f"  ({wall.col+1}, {wall.row + 1})")
-                lines.append(f"  ({chr(ord("a") + wall.col)}, {wall.row + 1})")
+                lines.append(f"  ({chr(ord('a') + wall.col)}, {wall.row + 1})")
         else:
             lines.append("  (none)")
 
