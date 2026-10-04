@@ -95,65 +95,128 @@ class MyPlayer(PlayerQuoridor):
         return value
     
     def _get_fast_forward_move(self, state):
-        own_player = next(
-            player for player in state.players
-            if player.id == self.id
-        )
+        own_player = next(player for player in state.players if player.id == self.id)
+        opponent = next(player for player in state.players if player.id != self.id)
 
-        opponent = next(
-            player for player in state.players
-            if player.id != self.id
-        )
+        my_row, my_col = state.rep.pawn_positions[self.id]
+        opponent_row, opponent_col = state.rep.pawn_positions[opponent.id]
 
-        my_position = state.rep.pawn_positions[self.id]
-        opponent_position = state.rep.pawn_positions[opponent.id]
+        my_goal = own_player.get_goal_row()
 
-        my_row, my_col = my_position
-        opponent_row, opponent_col = opponent_position
-
-        # If opponent is close to winning, use minimax so we can consider walls.
-        opponent_distance = state._shortest_path(opponent)
-
-        if opponent_distance <= 4:
-            return None
-
-        # Only generate pawn movement actions.
-        # This avoids the expensive wall-generation code.
         move_actions = state._legal_moves()
 
         if not move_actions:
             return None
 
-        # Direction toward our target row.
-        goal_row = own_player.get_goal_row()
+        forward_action = self._find_forward_action(move_actions, my_row, my_col, my_goal)
 
-        if goal_row < my_row:
-            forward_row = my_row - 1
-        else:
-            forward_row = my_row + 1
+        if self._players_are_adjacent(my_row, my_col, opponent_row, opponent_col):
+            best_move, _ = self._best_move_by_shortest_path(state, move_actions)
+            return best_move
 
-        forward_position = (forward_row, my_col)
+        crossed_midpoint = self._has_crossed_midpoint(state, own_player)
+
+        if not crossed_midpoint:
+            if forward_action is not None:
+                return forward_action
+
+            best_detour, best_detour_distance = self._best_move_by_shortest_path(state, move_actions)
+
+            opponent_distance = state._shortest_path(opponent)
+
+            if (
+                best_detour is not None
+                and best_detour_distance <= opponent_distance
+            ):
+                return best_detour
+
+            return None
+
+        my_distance = state._shortest_path(own_player)
+        opponent_distance = state._shortest_path(opponent)
+
+        if my_distance <= opponent_distance:
+            if forward_action is not None:
+                return forward_action
+
+            best_detour, best_detour_distance = self._best_move_by_shortest_path(state, move_actions)
+
+            if (
+                best_detour is not None
+                and best_detour_distance <= opponent_distance
+            ):
+                return best_detour
+
+            return None
+
+        return None
+
+
+    def _has_crossed_midpoint(self, state, player):
+        row, _ = state.rep.pawn_positions[player.id]
+        goal_row = player.get_goal_row()
+        midpoint = state.rep.dimension // 2
+
+        if goal_row == 0:
+            return row <= midpoint
+
+        return row >= midpoint
+
+
+    def _find_forward_action(self, move_actions, row, col, goal_row):
+        direction = -1 if goal_row < row else 1
+        forward_position = (row + direction, col)
 
         for action in move_actions:
             if action.data["destination"] == forward_position:
                 return action
 
-        if abs(my_row - opponent_row) + abs(my_col - opponent_col) == 1:
-            best_move = None
-            best_goal_distance = inf
-
-            for action in move_actions:
-                row, col = action.data["destination"]
-                goal_distance = abs(row - goal_row)
-
-                if goal_distance < best_goal_distance:
-                    best_goal_distance = goal_distance
-                    best_move = action
-
-            if best_move is not None:
-                return best_move
-
         return None
+
+
+    def _players_are_adjacent(self, my_row, my_col, opponent_row, opponent_col):
+        return (
+            abs(my_row - opponent_row)
+            + abs(my_col - opponent_col)
+            == 1
+        )
+
+
+    def _best_move_by_shortest_path(self, state, move_actions):
+        best_move = None
+        best_distance = inf
+
+        for action in move_actions:
+            child = state.apply_action(action)
+
+            child_player = next(
+                player for player in child.players
+                if player.id == self.id
+            )
+
+            distance = child._shortest_path(child_player)
+
+            if distance < best_distance:
+                best_distance = distance
+                best_move = action
+
+        return best_move, best_distance
+    
+    def _straight_path_clear(self, state, player):
+        row, col = state.rep.pawn_positions[player.id]
+        goal_row = player.get_goal_row()
+
+        direction = -1 if goal_row < row else 1
+
+        while row != goal_row:
+            next_position = (row + direction, col)
+
+            if state._blocked_by_wall((row, col), next_position):
+                return False
+
+            row += direction
+
+        return True
 
     def _ordered_successors(self, state: GameStateQuoridor, actions,
                             maximizing: bool):
