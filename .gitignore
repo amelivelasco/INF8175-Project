@@ -1,4 +1,3 @@
-test_agent.zip
-venv
-
-__pycache__
+*.zip
+__pycache__/
+*venv/
