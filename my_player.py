@@ -13,6 +13,7 @@ class MyPlayer(PlayerQuoridor):
     TARGETED_WALL_LIMIT = 12
     WIN_SCORE = 100_000
     WALL_MIN_ADVANTAGE = 2
+    SAFE_RACE_LEAD = 2
 
     def __init__(self, piece_type: str, goal_row: int=0, name: str = "bob", *args, **kwargs) -> None:
         """
@@ -113,46 +114,32 @@ class MyPlayer(PlayerQuoridor):
 
         forward_action = self._find_forward_action(move_actions, my_row, my_col, my_goal)
 
+        my_distance = state._shortest_path(own_player)
+        opponent_distance = state._shortest_path(opponent)
+        safe_race = (
+            my_distance == 1
+            or my_distance + self.SAFE_RACE_LEAD <= opponent_distance
+        )
+
+        # mur dwfensif
+        if not safe_race:
+            return None
+
         if self._players_are_adjacent(my_row, my_col, opponent_row, opponent_col):
             best_move, _ = self._best_move_by_shortest_path(state, move_actions)
             return best_move
 
-        my_distance = state._shortest_path(own_player)
-        opponent_distance = state._shortest_path(opponent)
-        crossed_midpoint = self._has_crossed_midpoint(state, own_player)
+        if forward_action is not None:
+            return forward_action
 
-        if not crossed_midpoint:
-            if my_distance > opponent_distance:
-                return None
-
-            if forward_action is not None:
-                return forward_action
-
-            best_detour, best_detour_distance = self._best_move_by_shortest_path(state, move_actions)
-
-            opponent_distance = state._shortest_path(opponent)
-
-            if (
-                best_detour is not None
-                and best_detour_distance <= opponent_distance
-            ):
-                return best_detour
-
-            return None
-
-        if my_distance <= opponent_distance:
-            if forward_action is not None:
-                return forward_action
-
-            best_detour, best_detour_distance = self._best_move_by_shortest_path(state, move_actions)
-
-            if (
-                best_detour is not None
-                and best_detour_distance <= opponent_distance
-            ):
-                return best_detour
-
-            return None
+        best_detour, best_detour_distance = self._best_move_by_shortest_path(
+            state, move_actions
+        )
+        if (
+            best_detour is not None
+            and best_detour_distance + self.SAFE_RACE_LEAD <= opponent_distance
+        ):
+            return best_detour
 
         return None
 
