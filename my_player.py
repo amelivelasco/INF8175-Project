@@ -58,12 +58,18 @@ class MyPlayer(PlayerQuoridor):
             raise RuntimeError("No legal action available.")
         
         best_action = actions[0]
-
-        simple_move = self._get_fast_forward_move(current_state)
-        if simple_move is not None:
-            return simple_move
-
+        
         try:
+            tactical_move = self._tactical_action(current_state, actions)
+            if tactical_move is not None:
+                return tactical_move
+
+            self._check_time()
+            
+            simple_move = self._get_fast_forward_move(current_state)
+            if simple_move is not None:
+                return simple_move
+            
             candidates = self._ordered_successors(current_state, actions, True)
             if not candidates:
                 return best_action
@@ -397,3 +403,46 @@ class MyPlayer(PlayerQuoridor):
                 
         score += wall_bonus
         return score
+    
+    
+    def _tactical_action(self, state: GameStateQuoridor, actions):
+        """Take an immediate win or prevent an opponent win on the next turn."""
+        own_player = next(p for p in state.players if p.id == self.id)
+        opponent = next(p for p in state.players if p.id != self.id)
+
+        # Always take a legal winning pawn move immediately.
+        for action in actions:
+            if (action.data["type"] == "move"
+                    and action.data["destination"][0] == own_player.get_goal_row()):
+                return action
+
+        # A pawn more than two rows from the goal cannot finish in one move,
+        # even when a jump over the other pawn is possible.
+        opponent_row = state.rep.pawn_positions[opponent.id][0]
+        if abs(opponent_row - opponent.get_goal_row()) > 2:
+            return None
+
+        best_defense = None
+        best_score = -inf
+        for action in actions:
+            # We must leave some time for a valid fallback action if the budget is nearly gone.
+            if time.monotonic() >= self._deadline - 0.10:
+                break
+
+            child = state.apply_action(action)
+
+            # After our action, the opponent becomes the active player.
+            opponent_can_win = any(
+                move.data["destination"][0] == opponent.get_goal_row()
+                for move in child._legal_moves()
+            )
+            if opponent_can_win:
+                continue
+
+            score = self._evaluate(child)
+            if score > best_score:
+                best_score = score
+                best_defense = action
+
+        return best_defense
+
