@@ -5,12 +5,16 @@ from seahorse.game.action import Action
 from actions_quoridor import Orientation, Wall
 from game_state_quoridor import GameStateQuoridor
 from player_quoridor import PlayerQuoridor
+import time
+
+class SearchTimeout(Exception):
+    pass
 
 class MyPlayer(PlayerQuoridor):
 
-    SEARCH_DEPTH = 4
-    BEAM_WIDTH = 16
-    TARGETED_WALL_LIMIT = 12
+    SEARCH_DEPTH = 3
+    BEAM_WIDTH = 6
+    TARGETED_WALL_LIMIT = 5
     WIN_SCORE = 100_000
     WALL_MIN_ADVANTAGE = 2
     SAFE_RACE_LEAD = 2
@@ -25,6 +29,11 @@ class MyPlayer(PlayerQuoridor):
             name (str, optional): Name of the player (default is "bob")
         """
         super().__init__(piece_type, goal_row, name, *args, **kwargs)
+    
+    def _check_time(self):
+        if time.monotonic() >= self._deadline:
+            raise SearchTimeout()
+        
 
     def compute_action(self, current_state: GameStateQuoridor, remaining_time: float = 15*60, **kwargs) -> Action:
         """
@@ -34,32 +43,53 @@ class MyPlayer(PlayerQuoridor):
         (https://www.youtube.com/watch?v=zp3VMe0Jpf8)
         """
         
-        simple_move = self._get_fast_forward_move(current_state)
-        if simple_move is not None:
-            return simple_move
+        start = time.monotonic()
+        budget = min(1.0, max(0.05, remaining_time * 0.03))
+        self._deadline = start + budget
 
         actions = list(current_state.generate_possible_stateless_actions())
         if not actions:
             raise RuntimeError("No legal action available.")
         
-        candidates = self._ordered_successors(current_state, actions, True)
-        best_action = candidates[0][0]
-        best_value = -inf
-        
-        alpha = -inf
-        beta = inf
+        best_action = actions[0]
 
-        for action, child in candidates:
-            value = self._minimax(child, self.SEARCH_DEPTH - 1, alpha, beta)
-            if value > best_value:
-                best_value = value
-                best_action = action
-            alpha = max(alpha, best_value)
+        simple_move = self._get_fast_forward_move(current_state)
+        if simple_move is not None:
+            return simple_move
+
+        try:
+            candidates = self._ordered_successors(current_state, actions, True)
+            if not candidates:
+                return best_action
+            
+            best_action = candidates[0][0]
+            for depth in range(1, self.SEARCH_DEPTH + 1):
+                iteration_best = best_action
+                iteration_value = -inf
+                alpha, beta = -inf, inf
+            
+
+                for action, child in candidates:
+                    self._check_time()
+                    value = self._minimax(child, depth - 1, alpha, beta)
+                    if value > iteration_value:
+                        iteration_value = value
+                        iteration_best = action
+                    alpha = max(alpha, iteration_value)
+                    
+                best_action = iteration_best
+                
+        except SearchTimeout:
+            pass
+        
 
         return best_action
 
     def _minimax(self, state: GameStateQuoridor, depth: int,
                  alpha: float, beta: float) -> float:
+        
+        self._check_time()
+
         if depth == 0 or state.is_done():
             return self._evaluate(state)
 
