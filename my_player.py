@@ -20,6 +20,8 @@ class MyPlayer(PlayerQuoridor):
     SAFE_RACE_LEAD = 2
     WALL_SELF_COST_WEIGHT = 1.5
     WALL_TURN_COST = 0.5
+    WALL_RESERVE_EARLY = 3.0
+    WALL_RESERVE_LATE = 0.5
 
     def __init__(self, piece_type: str, goal_row: int=0, name: str = "bob", *args, **kwargs) -> None:
         """
@@ -363,31 +365,35 @@ class MyPlayer(PlayerQuoridor):
         own_distance = self._distance(state, own_player)
         opponent_distance = self._distance(state, opponent)
         
-        score = 10 * (opponent_distance - own_distance) 
-        if own_distance <= 1:
-            score += 5000
-        elif own_distance == 2:
-            score += 800
-        elif own_distance == 3:
-            score += 300
-        elif own_distance == 4:
-            score += 100
-            
-        if opponent_distance <= 1:
-            score -= 6000
-        elif opponent_distance == 2:
-            score -= 1200
-        elif opponent_distance == 3:
-            score -= 400
-        elif opponent_distance == 4:
-            score -= 150
+        own_walls = state.rep.remaining_walls[self.id]
+        opponent_walls = state.rep.remaining_walls[opponent.id]
 
+        board_size = state.rep.dimension
+        progress = 1 - min(own_distance, opponent_distance) / max(1, board_size - 1)
+        progress = max(0.0, min(1.0, progress))
+
+        wall_weight = (
+            self.WALL_RESERVE_EARLY * (1 - progress)
+            + self.WALL_RESERVE_LATE * progress
+        )
+
+        wall_bonus = wall_weight * (own_walls - opponent_walls)
+        
         lead = opponent_distance - own_distance
-        score += 2 * lead * abs(lead)
+        score = 12 * lead
+        
+        score += 1.5 * lead * abs(lead)
+        
+        proximity_bonus = {1: 1200, 2: 350, 3: 150, 4: 60}
+        score += proximity_bonus.get(own_distance, 0)
+        score -= proximity_bonus.get(opponent_distance, 0)
         
         if state.active_player.id == self.id:
-            score += 2
+            if own_distance == 1:
+                score += 4000
         else:
-            score -= 2
-
+            if opponent_distance == 1:
+                score -= 4500
+                
+        score += wall_bonus
         return score
