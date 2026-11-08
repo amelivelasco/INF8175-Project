@@ -22,6 +22,9 @@ class MyPlayer(PlayerQuoridor):
     WALL_TURN_COST = 0.5
     WALL_RESERVE_EARLY = 3.0
     WALL_RESERVE_LATE = 0.5
+    MAX_MOVE_SECONDS = 1.5
+    TIME_RESERVE_SECONDS = 0.25
+    TIME_FRACTION = 0.025
 
     def __init__(self, piece_type: str, goal_row: int=0, name: str = "bob", *args, **kwargs) -> None:
         """
@@ -50,7 +53,14 @@ class MyPlayer(PlayerQuoridor):
         self._distance_cache.clear()
         
         start = time.monotonic()
-        budget = min(1.0, max(0.05, remaining_time * 0.03))
+        
+        credit = max(0.0, float(remaining_time))
+        budget = min(
+            self.MAX_MOVE_SECONDS,
+            credit * self.TIME_FRACTION,
+            max(0.0, credit - self.TIME_RESERVE_SECONDS)
+        )
+        
         self._deadline = start + budget
 
         actions = list(current_state.generate_possible_stateless_actions())
@@ -75,7 +85,11 @@ class MyPlayer(PlayerQuoridor):
                 return best_action
             
             best_action = candidates[0][0]
-            for depth in range(1, self.SEARCH_DEPTH + 1):
+            
+            max_depth, self._beam_width = self._search_settings(current_state, credit)
+            max_depth = min(max_depth, self.SEARCH_DEPTH)
+            
+            for depth in range(1, max_depth + 1):
                 iteration_best = best_action
                 iteration_value = -inf
                 alpha, beta = -inf, inf
@@ -266,7 +280,7 @@ class MyPlayer(PlayerQuoridor):
             successors.append((action, child, score))       
     
         successors.sort(key=lambda item: item[2], reverse=maximizing)
-        return [(action, child) for action, child, _ in successors[:self.BEAM_WIDTH]]
+        return [(action, child) for action, child, _ in successors[:getattr(self, "_beam_width", self.BEAM_WIDTH)]]
 
     def _targeted_actions(self, state: GameStateQuoridor, actions):
         self._check_time()
@@ -445,4 +459,17 @@ class MyPlayer(PlayerQuoridor):
                 best_defense = action
 
         return best_defense
+    
+    def _search_settings(self, state: GameStateQuoridor, remaining_time: float):
+        """Choose search depth and beam width based on complexity."""
+        walls = sum(state.rep.remaining_walls.values())
+
+        if remaining_time < 10:
+            return 2, 4
+        if walls >= 12:
+            return 3, 5
+        if walls >= 5:
+            return 4, 6
+        return 5, 8
+
 
