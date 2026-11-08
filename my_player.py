@@ -31,6 +31,7 @@ class MyPlayer(PlayerQuoridor):
             name (str, optional): Name of the player (default is "bob")
         """
         super().__init__(piece_type, goal_row, name, *args, **kwargs)
+        self._distance_cache = {}
     
     def _check_time(self):
         if time.monotonic() >= self._deadline:
@@ -44,6 +45,7 @@ class MyPlayer(PlayerQuoridor):
         on choisi
         (https://www.youtube.com/watch?v=zp3VMe0Jpf8)
         """
+        self._distance_cache.clear()
         
         start = time.monotonic()
         budget = min(1.0, max(0.05, remaining_time * 0.03))
@@ -146,8 +148,8 @@ class MyPlayer(PlayerQuoridor):
 
         forward_action = self._find_forward_action(move_actions, my_row, my_col, my_goal)
 
-        my_distance = state._shortest_path(own_player)
-        opponent_distance = state._shortest_path(opponent)
+        my_distance = self._distance(state, own_player)
+        opponent_distance = self._distance(state, opponent)
         safe_race = (
             my_distance == 1
             or my_distance + self.SAFE_RACE_LEAD <= opponent_distance
@@ -165,7 +167,7 @@ class MyPlayer(PlayerQuoridor):
             child = state.apply_action(forward_action)
             child_player = next(p for p in child.players if p.id == self.id)
 
-            if child._shortest_path(child_player) < my_distance:
+            if self._distance(child, child_player) < my_distance:
                 return forward_action
 
         best_detour, best_detour_distance = self._best_move_by_shortest_path(
@@ -222,7 +224,7 @@ class MyPlayer(PlayerQuoridor):
                 if player.id == self.id
             )
 
-            distance = child._shortest_path(child_player)
+            distance = self._distance(child, child_player)
 
             if distance < best_distance:
                 best_distance = distance
@@ -265,9 +267,9 @@ class MyPlayer(PlayerQuoridor):
             player for player in state.players if player.id != active_player.id
         )
         target_edges = self._shortest_path_edges(state, target_player)
-        own_distance = state._shortest_path(active_player)
-        opponent_distance = state._shortest_path(target_player)
-        
+        own_distance = self._distance(state, active_player)
+        opponent_distance = self._distance(state, target_player)
+
         moves = []
         walls = []
         for action in actions:
@@ -281,11 +283,11 @@ class MyPlayer(PlayerQuoridor):
         for action in walls:
             self._check_time()
             child = state.apply_action(action)
-            opponent_delay = child._shortest_path(target_player) - opponent_distance
+            opponent_delay = self._distance(child, target_player) - opponent_distance
             if opponent_delay <= 0:
                 continue
 
-            own_delay = child._shortest_path(active_player) - own_distance
+            own_delay = self._distance(child, active_player) - own_distance
             benefit = opponent_delay - self.WALL_SELF_COST_WEIGHT * own_delay - self.WALL_TURN_COST
             if benefit > 0:
                 ranked_walls.append((benefit, action, child))
@@ -336,6 +338,18 @@ class MyPlayer(PlayerQuoridor):
         
     def _is_wall(self, action: Action) -> bool:
         return action.data["type"] in ("horizontal", "vertical")
+    
+    def _distance(self, state: GameStateQuoridor, player) -> int:
+        key = (id(state), player.id)
+        cached = self._distance_cache.get(key)
+
+        if cached is not None and cached[0] is state:
+            return cached[1]
+
+        distance = state._shortest_path(player)
+        self._distance_cache[key] = (state, distance)
+        return distance
+
 
     def _evaluate(self, state: GameStateQuoridor) -> float:
         own_player = next(player for player in state.players if player.id == self.id)
@@ -346,8 +360,8 @@ class MyPlayer(PlayerQuoridor):
         if state.scores.get(opponent.id) == 1.0:
             return -self.WIN_SCORE
 
-        own_distance = state._shortest_path(own_player)
-        opponent_distance = state._shortest_path(opponent)
+        own_distance = self._distance(state, own_player)
+        opponent_distance = self._distance(state, opponent)
         
         score = 10 * (opponent_distance - own_distance) 
         if own_distance <= 1:
