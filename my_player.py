@@ -157,6 +157,9 @@ class MyPlayer(PlayerQuoridor):
     def _get_fast_forward_move(self, state):
         own_player = next(player for player in state.players if player.id == self.id)
         opponent = next(player for player in state.players if player.id != self.id)
+        
+        if state.rep.remaining_walls[opponent.id] != 0:
+            return None
 
         my_row, my_col = state.rep.pawn_positions[self.id]
         opponent_row, opponent_col = state.rep.pawn_positions[opponent.id]
@@ -172,36 +175,36 @@ class MyPlayer(PlayerQuoridor):
 
         my_distance = self._distance(state, own_player)
         opponent_distance = self._distance(state, opponent)
-        safe_race = (
-            my_distance == 1
-            or my_distance + self.SAFE_RACE_LEAD <= opponent_distance
-        )
-
-        # mur dwfensif
-        if not safe_race:
+        
+        if my_distance + 3 > opponent_distance:
+            return None
+        
+        if self._players_are_adjacent(my_row, my_col, opponent_row, opponent_col):
+            return None
+        
+        if not self._straight_path_clear(state, own_player):
+            return None
+        
+        if forward_action is None:
             return None
 
-        if self._players_are_adjacent(my_row, my_col, opponent_row, opponent_col):
-            best_move, _ = self._best_move_by_shortest_path(state, move_actions)
-            return best_move
+        child = state.apply_action(forward_action)
+        child_player = next(p for p in child.players if p.id == self.id)
 
-        if forward_action is not None:
-            child = state.apply_action(forward_action)
-            child_player = next(p for p in child.players if p.id == self.id)
+        if self._distance(child, child_player) != my_distance - 1:
+            return None
+        
+        for reply in child._legal_moves():
+            self._check_time()
+            reply_state = child.apply_action(reply)
 
-            if self._distance(child, child_player) < my_distance:
-                return forward_action
+            if reply_state.scores.get(opponent.id) == 1.0:
+                return None
 
-        best_detour, best_detour_distance = self._best_move_by_shortest_path(
-            state, move_actions
-        )
-        if (
-            best_detour is not None
-            and best_detour_distance + self.SAFE_RACE_LEAD <= opponent_distance
-        ):
-            return best_detour
-
-        return None
+            if self._distance(reply_state, opponent) <= my_distance - 1:
+                return None
+            
+        return forward_action
 
 
     def _has_crossed_midpoint(self, state, player):
