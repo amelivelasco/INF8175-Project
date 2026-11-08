@@ -1,6 +1,7 @@
 from math import inf
 
 from seahorse.game.action import Action
+from seahorse.game.stateless_action import StatelessAction
 
 from actions_quoridor import Orientation, Wall
 from game_state_quoridor import GameStateQuoridor
@@ -12,7 +13,7 @@ class SearchTimeout(Exception):
 
 class MyPlayer(PlayerQuoridor):
 
-    SEARCH_DEPTH = 3
+    SEARCH_DEPTH = 5
     BEAM_WIDTH = 6
     TARGETED_WALL_LIMIT = 5
     WIN_SCORE = 100_000
@@ -63,13 +64,16 @@ class MyPlayer(PlayerQuoridor):
         
         self._deadline = start + budget
 
-        actions = list(current_state.generate_possible_stateless_actions())
-        if not actions:
-            raise RuntimeError("No legal action available.")
-        
-        best_action = actions[0]
-        
+        moves = current_state._legal_moves()
+        if not moves:
+            raise RuntimeError("No legal pawn move available.")
+
+        best_action = moves[0]
+
         try:
+            self._check_time()
+            actions = self._candidate_actions(current_state)
+
             tactical_move = self._tactical_action(current_state, actions)
             if tactical_move is not None:
                 return tactical_move
@@ -80,14 +84,14 @@ class MyPlayer(PlayerQuoridor):
             if simple_move is not None:
                 return simple_move
             
+            max_depth, self._beam_width = self._search_settings(current_state, credit)
+            max_depth = min(max_depth, self.SEARCH_DEPTH)
+
             candidates = self._ordered_successors(current_state, actions, True)
             if not candidates:
                 return best_action
-            
+
             best_action = candidates[0][0]
-            
-            max_depth, self._beam_width = self._search_settings(current_state, credit)
-            max_depth = min(max_depth, self.SEARCH_DEPTH)
             
             for depth in range(1, max_depth + 1):
                 iteration_best = best_action
@@ -119,7 +123,7 @@ class MyPlayer(PlayerQuoridor):
         if depth == 0 or state.is_done():
             return self._evaluate(state)
 
-        actions = list(state.generate_possible_stateless_actions())
+        actions = self._candidate_actions(state)
         
         if not actions:
             return self._evaluate(state)
@@ -273,17 +277,52 @@ class MyPlayer(PlayerQuoridor):
 
         return True
 
+
     def _ordered_successors(self, state: GameStateQuoridor, actions,
                             maximizing: bool):
-        successors = []
+        self._check_time()
+        active = state.active_player
+        opponent = next(p for p in state.players if p.id != active.id)
 
-        for action, child in self._targeted_actions(state, actions):
+        # Winning moves always take priority.
+        for action in actions:
+            if action.data["type"] == "move" and action.data["destination"][0] == active.get_goal_row():
+                return [(action, state.apply_action(action))]
+
+        opponent_row = state.rep.pawn_positions[opponent.id][0]
+        urgent = abs(opponent_row - opponent.get_goal_row()) <= 2
+
+        if urgent:
+            candidates = ((a, state.apply_action(a)) for a in actions)
+        else:
+            candidates = self._targeted_actions(state, actions)
+
+        safe = []
+        unsafe = []
+
+        for action, child in candidates:
             self._check_time()
-            score = self._evaluate(child)
-            successors.append((action, child, score))       
-    
-        successors.sort(key=lambda item: item[2], reverse=maximizing)
-        return [(action, child) for action, child, _ in successors[:getattr(self, "_beam_width", self.BEAM_WIDTH)]]
+
+            if urgent and any(
+                move.data["destination"][0] == opponent.get_goal_row()
+                for move in child._legal_moves()
+            ):
+                unsafe.append((action, child))
+            else:
+                safe.append((action, child))
+
+        selected = safe if safe else unsafe
+
+        ranked = []
+        for action, child in selected:
+            self._check_time()
+            ranked.append((action, child, self._evaluate(child)))
+
+        ranked.sort(key=lambda item: item[2], reverse=maximizing)
+        width = getattr(self, "_beam_width", self.BEAM_WIDTH)
+
+        return [(action, child) for action, child, _ in ranked[:width]]
+
 
     def _targeted_actions(self, state: GameStateQuoridor, actions):
         self._check_time()
@@ -474,5 +513,44 @@ class MyPlayer(PlayerQuoridor):
         if walls >= 5:
             return 4, 6
         return 5, 8
+    
+    
+    def _candidate_actions(self, state: GameStateQuoridor):
+        """Generate pawn moves and promising legal wall placements."""
+        self._check_time()
+
+        moves = state._legal_moves()
+        active = state.active_player
+        opponent = next(p for p in state.players if p.id != active.id)
+
+        if state.rep.remaining_walls[active.id] == 0:
+            return moves
+
+        opponent_row = state.rep.pawn_positions[opponent.id][0]
+
+        # Search all legal walls when the opponent is close to winning.
+        if abs(opponent_row - opponent.get_goal_row()) <= 2:
+            return moves + state._legal_walls()
+
+        # Find walls that intersect the opponent's shortest path.
+        edges = self._shortest_path_edges(state, opponent)
+        wall_set = set()
+
+        for edge in edges:
+            self._check_time()
+            wall_set.update(state._candidate_blocking_walls(*tuple(edge)))
+
+        walls = []
+        for wall in wall_set:
+            self._check_time()
+
+            if state._is_wall_legal(wall):
+                walls.append(StatelessAction({
+                    "type": "horizontal" if wall.orientation == Orientation.HORIZONTAL else "vertical",
+                    "destination": (wall.row, wall.col)
+                }))
+
+        return moves + walls
+
 
 
