@@ -24,10 +24,11 @@ class MyPlayer(PlayerQuoridor):
     WALL_TURN_COST = 0.5
     WALL_RESERVE_EARLY = 3.0
     WALL_RESERVE_LATE = 0.5
-    MAX_MOVE_SECONDS = 1.5
-    TIME_RESERVE_SECONDS = 0.25
-    TIME_FRACTION = 0.025
+    MAX_MOVE_SECONDS = 8.0
+    TIME_RESERVE_SECONDS = 30.0
+    TIME_FRACTION = 0.04
     MAX_TRANSPOSITION_ENTRIES = 50_000
+    THREAT_DISTANCE = 2
 
     def __init__(self, piece_type: str, goal_row: int=0, name: str = "bob", *args, **kwargs) -> None:
         """
@@ -57,17 +58,27 @@ class MyPlayer(PlayerQuoridor):
         self._distance_cache.clear()
         self._transposition_table.clear()
         
-        start = time.monotonic()
-        
         credit = max(0.0, float(remaining_time))
+        my_player = next(p for p in current_state.players if p.id == self.id)
+        opponent = next(p for p in current_state.players if p.id != self.id)
+
+        my_dist = self._distance(current_state, my_player)
+        opp_dist = self._distance(current_state, opponent)
+
+        # Allocate more time when opponents approach the goal
+        if min(my_dist, opp_dist) <= 4:
+            time_fraction = 0.06
+        else:
+            time_fraction = 0.03
+
         budget = min(
             self.MAX_MOVE_SECONDS,
-            credit * self.TIME_FRACTION,
+            credit * time_fraction,
             max(0.0, credit - self.TIME_RESERVE_SECONDS)
         )
-        
-        self._deadline = start + budget
 
+        self._deadline = time.monotonic() + budget
+        
         moves = current_state._legal_moves()
         if not moves:
             raise RuntimeError("No legal pawn move available.")
@@ -118,65 +129,88 @@ class MyPlayer(PlayerQuoridor):
         
 
         return best_action
+    
+    
+    def _lookup_transposition(self, key, alpha: float, beta: float):
+        cached = self._transposition_table.get(key)
+        if cached is None:
+            return None, alpha, beta
+
+        value, bound = cached
+        if bound == "exact":
+            return value, alpha, beta
+
+        if bound == "lower":
+            alpha = max(alpha, value)
+        else:
+            beta = min(beta, value)
+
+        if alpha >= beta:
+            return value, alpha, beta
+
+        return None, alpha, beta
+
+
+    def _alpha_beta_search(self, successors, depth: int,
+                        alpha: float, beta: float, maximizing: bool) -> float:
+        value = -inf if maximizing else inf
+
+        for _, child in successors:
+            child_value = self._minimax(child, depth - 1, alpha, beta)
+
+            if maximizing:
+                value = max(value, child_value)
+                alpha = max(alpha, value)
+            else:
+                value = min(value, child_value)
+                beta = min(beta, value)
+
+            if alpha >= beta:
+                break
+
+        return value
+
 
     def _minimax(self, state: GameStateQuoridor, depth: int,
-                 alpha: float, beta: float) -> float:
+                alpha: float, beta: float) -> float:
         self._check_time()
         alpha_start, beta_start = alpha, beta
         key = self._transposition_key(state, depth)
-        cached = self._transposition_table.get(key)
 
-        if cached is not None:
-            value, bound = cached
-            if bound == "exact":
-                return value
-            if bound == "lower":
-                alpha = max(alpha, value)
+        cached_value, alpha, beta = self._lookup_transposition(key, alpha, beta)
+        if cached_value is not None:
+            return cached_value
+
+        if state.is_done():
+            value = self._evaluate(state)
+        elif depth <= 0:
+            if depth == 0 and self._needs_threat_extension(state):
+                actions = self._candidate_actions(state)
+                maximizing = state.active_player.id == self.id
+                successors = self._ordered_successors(state, actions, maximizing)
+                value = self._alpha_beta_search(
+                    successors, 0, alpha, beta, maximizing
+                ) if successors else self._evaluate(state)
             else:
-                beta = min(beta, value)
-            if alpha >= beta:
-                return value
+                value = self._evaluate(state)
+        else:
+            actions = self._candidate_actions(state)
+            if not actions:
+                value = self._evaluate(state)
+            else:
+                maximizing = state.active_player.id == self.id
+                successors = self._ordered_successors(state, actions, maximizing)
+                value = self._alpha_beta_search(successors, depth, alpha, beta, maximizing)
 
-        if depth == 0 or state.is_done():
-            value = self._evaluate(state)
-            self._store_transposition(key, value, alpha_start, beta_start)
-            return value
-
-        actions = self._candidate_actions(state)
-        
-        if not actions:
-            value = self._evaluate(state)
-            self._store_transposition(key, value, alpha_start, beta_start)
-            return value
-        
-        maximizing = state.active_player.id == self.id
-        
-        successors = self._ordered_successors(
-            state,
-            actions,
-            maximizing,
-        )
-
-        if maximizing:
-            value = -inf
-            for _, child in successors:
-                value = max(value, self._minimax(child, depth - 1, alpha, beta))
-                
-                alpha = max(alpha, value) # Propagate the alpha value up the tree
-                
-                if alpha >= beta:
-                    break
-            self._store_transposition(key, value, alpha_start, beta_start)
-            return value
-
-        value = inf
-        for _, child in successors:
-            value = min(value, self._minimax(child, depth - 1, alpha, beta))
-            beta = min(beta, value)
-            if alpha >= beta:
-                break
         self._store_transposition(key, value, alpha_start, beta_start)
         return value
+
+    def _needs_threat_extension(self, state: GameStateQuoridor) -> bool:
+        return any(
+            self._distance(state, player) <= self.THREAT_DISTANCE
+            for player in state.players
+        )
+
 
     def _transposition_key(self, state: GameStateQuoridor, depth: int):
         rep = state.rep
@@ -395,7 +429,13 @@ class MyPlayer(PlayerQuoridor):
                 continue
 
             own_delay = self._distance(child, active_player) - own_distance
-            benefit = opponent_delay - self.WALL_SELF_COST_WEIGHT * own_delay - self.WALL_TURN_COST
+            benefit = self._wall_benefit(
+                opponent_delay,
+                own_delay,
+                own_distance,
+                opponent_distance,
+                state.rep.remaining_walls[active_player.id]
+            )
             if benefit > 0:
                 ranked_walls.append((benefit, action, child))
                 
@@ -465,55 +505,135 @@ class MyPlayer(PlayerQuoridor):
         if cached is not None and cached[0] is state:
             return cached[1]
 
-        distance = state._shortest_path(player)
+        distance = self._pawn_aware_distance(state, player)
         self._distance_cache[key] = (state, distance)
         return distance
 
+    def _pawn_aware_distance(self, state: GameStateQuoridor, player) -> int:
+        opponent = next(p for p in state.players if p.id != player.id)
+        start = state.rep.pawn_positions[player.id]
+        opponent_position = state.rep.pawn_positions[opponent.id]
+        queue = deque([(start, 0)])
+        visited = {start}
+
+        while queue:
+            position, distance = queue.popleft()
+            if position[0] == player.get_goal_row():
+                return distance
+
+            for neighbour in self._pawn_neighbours(
+                state, position, opponent_position
+            ):
+                if neighbour not in visited:
+                    visited.add(neighbour)
+                    queue.append((neighbour, distance + 1))
+
+        return state._shortest_path(player)
+
+    def _pawn_neighbours(self, state: GameStateQuoridor, position,
+                         opponent_position):
+        row, col = position
+        dimension = state.rep.dimension
+
+        for row_delta, col_delta in state.DIRECTIONS:
+            adjacent = row + row_delta, col + col_delta
+            if not self._inside_board(adjacent, dimension):
+                continue
+            if state._blocked_by_wall(position, adjacent):
+                continue
+            if adjacent != opponent_position:
+                yield adjacent
+                continue
+
+            jump = adjacent[0] + row_delta, adjacent[1] + col_delta
+            if (
+                self._inside_board(jump, dimension)
+                and not state._blocked_by_wall(adjacent, jump)
+            ):
+                yield jump
+                continue
+
+            perpendiculars = (
+                ((0, -1), (0, 1))
+                if row_delta else ((-1, 0), (1, 0))
+            )
+            for diagonal_delta in perpendiculars:
+                diagonal = (
+                    adjacent[0] + diagonal_delta[0],
+                    adjacent[1] + diagonal_delta[1],
+                )
+                if (
+                    self._inside_board(diagonal, dimension)
+                    and not state._blocked_by_wall(adjacent, diagonal)
+                ):
+                    yield diagonal
+
+    def _inside_board(self, position, dimension: int) -> bool:
+        return all(0 <= coordinate < dimension for coordinate in position)
+
 
     def _evaluate(self, state: GameStateQuoridor) -> float:
-        own_player = next(player for player in state.players if player.id == self.id)
-        opponent = next(player for player in state.players if player.id != self.id)
+        # Improved heuristic now accounts for wall resources and turn advantage.
+        own = next(p for p in state.players if p.id == self.id)
+        opp = next(p for p in state.players if p.id != self.id)
 
         if state.scores.get(self.id) == 1.0:
             return self.WIN_SCORE
-        if state.scores.get(opponent.id) == 1.0:
+
+        if state.scores.get(opp.id) == 1.0:
             return -self.WIN_SCORE
 
-        own_distance = self._distance(state, own_player)
-        opponent_distance = self._distance(state, opponent)
-        
-        own_walls = state.rep.remaining_walls[self.id]
-        opponent_walls = state.rep.remaining_walls[opponent.id]
+        my_dist = self._distance(state, own)
+        opp_dist = self._distance(state, opp)
 
-        board_size = state.rep.dimension
-        progress = 1 - min(own_distance, opponent_distance) / max(1, board_size - 1)
-        progress = max(0.0, min(1.0, progress))
+        my_walls = state.rep.remaining_walls[self.id]
+        opp_walls = state.rep.remaining_walls[opp.id]
 
-        wall_weight = (
-            self.WALL_RESERVE_EARLY * (1 - progress)
-            + self.WALL_RESERVE_LATE * progress
-        )
+        lead = opp_dist - my_dist
 
-        wall_bonus = wall_weight * (own_walls - opponent_walls)
-        
-        lead = opponent_distance - own_distance
-        score = 12 * lead
-        
-        score += 1.5 * lead * abs(lead)
-        
-        proximity_bonus = {1: 1200, 2: 350, 3: 150, 4: 60}
-        score += proximity_bonus.get(own_distance, 0)
-        score -= proximity_bonus.get(opponent_distance, 0)
-        
+        # Fundamental shortest-path advantage
+        score = 20.0 * lead
+
+        # Wall resources
+        wall_weight = 2.0 if min(my_dist, opp_dist) > 5 else 0.8
+        score += wall_weight * (my_walls - opp_walls)
+
+        # Turn advantage
         if state.active_player.id == self.id:
-            if own_distance == 1:
-                score += 4000
+            score += 3.0
         else:
-            if opponent_distance == 1:
-                score -= 4500
-                
-        score += wall_bonus
+            score -= 3.0
+
+        # Endgame urgency
+        if my_dist <= 4 or opp_dist <= 4:
+            score += 8.0 * lead
+
+        # Stronger preference for an established lead
+        if lead > 0:
+            score += 2.0 * lead * lead
+        elif lead < 0:
+            score -= 2.0 * lead * lead
+
         return score
+    
+    def _wall_benefit(self, opponent_delay, own_delay,
+                  my_dist, opp_dist, my_walls):
+        lead = opp_dist - my_dist
+
+        benefit = opponent_delay - 1.5 * own_delay
+
+        # A wall uses a turn that could have been spent moving.
+        benefit -= 1.0
+
+        # Penalize spending the last remaining walls.
+        if my_walls <= 2:
+            benefit -= 0.5
+
+        # Conserve walls when already ahead.
+        if lead >= 3:
+            benefit -= 1.0
+
+        return benefit
     
     
     def _tactical_action(self, state: GameStateQuoridor, actions):
@@ -522,9 +642,8 @@ class MyPlayer(PlayerQuoridor):
         opponent = next(p for p in state.players if p.id != self.id)
 
         # Always take a legal winning pawn move immediately.
-        for action in actions:
-            if (action.data["type"] == "move"
-                    and action.data["destination"][0] == own_player.get_goal_row()):
+        for action in state._legal_moves():
+            if action.data["destination"][0] == own_player.get_goal_row():
                 return action
 
         # A pawn more than two rows from the goal cannot finish in one move,
@@ -533,29 +652,45 @@ class MyPlayer(PlayerQuoridor):
         if abs(opponent_row - opponent.get_goal_row()) > 2:
             return None
 
-        best_defense = None
-        best_score = -inf
-        for action in actions:
-            # We must leave some time for a valid fallback action if the budget is nearly gone.
-            if time.monotonic() >= self._deadline - 0.10:
-                break
+        moves = state._legal_moves()
+        threat_exists = False
+        
+        for move in moves:
+            self._check_time()
+            child = state.apply_action(move)
 
+            if any(
+                reply.data["destination"][0] == opponent.get_goal_row()
+                for reply in child._legal_moves()
+            ):
+                threat_exists = True
+                break
+            
+        if not threat_exists:
+            return None
+
+        best_action = None
+        best_score = -inf
+            
+        for action in actions:
+            self._check_time()
             child = state.apply_action(action)
 
-            # After our action, the opponent becomes the active player.
             opponent_can_win = any(
-                move.data["destination"][0] == opponent.get_goal_row()
-                for move in child._legal_moves()
+                reply.data["destination"][0] == opponent.get_goal_row()
+                for reply in child._legal_moves()
             )
+
             if opponent_can_win:
                 continue
 
             score = self._evaluate(child)
+
             if score > best_score:
                 best_score = score
-                best_defense = action
+                best_action = action
 
-        return best_defense
+        return best_action
     
     def _search_settings(self, state: GameStateQuoridor, remaining_time: float):
         """Choose search depth and beam width based on complexity."""
