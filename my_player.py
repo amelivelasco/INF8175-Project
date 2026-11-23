@@ -28,6 +28,7 @@ class MyPlayer(PlayerQuoridor):
     TIME_RESERVE_SECONDS = 30.0
     TIME_FRACTION = 0.04
     MAX_TRANSPOSITION_ENTRIES = 50_000
+    THREAT_DISTANCE = 2
 
     def __init__(self, piece_type: str, goal_row: int=0, name: str = "bob", *args, **kwargs) -> None:
         """
@@ -180,8 +181,18 @@ class MyPlayer(PlayerQuoridor):
         if cached_value is not None:
             return cached_value
 
-        if depth == 0 or state.is_done():
+        if state.is_done():
             value = self._evaluate(state)
+        elif depth <= 0:
+            if depth == 0 and self._needs_threat_extension(state):
+                actions = self._candidate_actions(state)
+                maximizing = state.active_player.id == self.id
+                successors = self._ordered_successors(state, actions, maximizing)
+                value = self._alpha_beta_search(
+                    successors, 0, alpha, beta, maximizing
+                ) if successors else self._evaluate(state)
+            else:
+                value = self._evaluate(state)
         else:
             actions = self._candidate_actions(state)
             if not actions:
@@ -193,6 +204,12 @@ class MyPlayer(PlayerQuoridor):
 
         self._store_transposition(key, value, alpha_start, beta_start)
         return value
+
+    def _needs_threat_extension(self, state: GameStateQuoridor) -> bool:
+        return any(
+            self._distance(state, player) <= self.THREAT_DISTANCE
+            for player in state.players
+        )
 
 
     def _transposition_key(self, state: GameStateQuoridor, depth: int):
@@ -488,9 +505,71 @@ class MyPlayer(PlayerQuoridor):
         if cached is not None and cached[0] is state:
             return cached[1]
 
-        distance = state._shortest_path(player)
+        distance = self._pawn_aware_distance(state, player)
         self._distance_cache[key] = (state, distance)
         return distance
+
+    def _pawn_aware_distance(self, state: GameStateQuoridor, player) -> int:
+        opponent = next(p for p in state.players if p.id != player.id)
+        start = state.rep.pawn_positions[player.id]
+        opponent_position = state.rep.pawn_positions[opponent.id]
+        queue = deque([(start, 0)])
+        visited = {start}
+
+        while queue:
+            position, distance = queue.popleft()
+            if position[0] == player.get_goal_row():
+                return distance
+
+            for neighbour in self._pawn_neighbours(
+                state, position, opponent_position
+            ):
+                if neighbour not in visited:
+                    visited.add(neighbour)
+                    queue.append((neighbour, distance + 1))
+
+        return state._shortest_path(player)
+
+    def _pawn_neighbours(self, state: GameStateQuoridor, position,
+                         opponent_position):
+        row, col = position
+        dimension = state.rep.dimension
+
+        for row_delta, col_delta in state.DIRECTIONS:
+            adjacent = row + row_delta, col + col_delta
+            if not self._inside_board(adjacent, dimension):
+                continue
+            if state._blocked_by_wall(position, adjacent):
+                continue
+            if adjacent != opponent_position:
+                yield adjacent
+                continue
+
+            jump = adjacent[0] + row_delta, adjacent[1] + col_delta
+            if (
+                self._inside_board(jump, dimension)
+                and not state._blocked_by_wall(adjacent, jump)
+            ):
+                yield jump
+                continue
+
+            perpendiculars = (
+                ((0, -1), (0, 1))
+                if row_delta else ((-1, 0), (1, 0))
+            )
+            for diagonal_delta in perpendiculars:
+                diagonal = (
+                    adjacent[0] + diagonal_delta[0],
+                    adjacent[1] + diagonal_delta[1],
+                )
+                if (
+                    self._inside_board(diagonal, dimension)
+                    and not state._blocked_by_wall(adjacent, diagonal)
+                ):
+                    yield diagonal
+
+    def _inside_board(self, position, dimension: int) -> bool:
+        return all(0 <= coordinate < dimension for coordinate in position)
 
 
     def _evaluate(self, state: GameStateQuoridor) -> float:
