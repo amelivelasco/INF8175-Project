@@ -1,4 +1,5 @@
 from math import inf
+from collections import deque
 
 from seahorse.game.action import Action
 from seahorse.game.stateless_action import StatelessAction
@@ -26,6 +27,7 @@ class MyPlayer(PlayerQuoridor):
     MAX_MOVE_SECONDS = 1.5
     TIME_RESERVE_SECONDS = 0.25
     TIME_FRACTION = 0.025
+    MAX_TRANSPOSITION_ENTRIES = 50_000
 
     def __init__(self, piece_type: str, goal_row: int=0, name: str = "bob", *args, **kwargs) -> None:
         """
@@ -38,6 +40,7 @@ class MyPlayer(PlayerQuoridor):
         """
         super().__init__(piece_type, goal_row, name, *args, **kwargs)
         self._distance_cache = {}
+        self._transposition_table = {}
     
     def _check_time(self):
         if time.monotonic() >= self._deadline:
@@ -52,6 +55,7 @@ class MyPlayer(PlayerQuoridor):
         (https://www.youtube.com/watch?v=zp3VMe0Jpf8)
         """
         self._distance_cache.clear()
+        self._transposition_table.clear()
         
         start = time.monotonic()
         
@@ -117,16 +121,33 @@ class MyPlayer(PlayerQuoridor):
 
     def _minimax(self, state: GameStateQuoridor, depth: int,
                  alpha: float, beta: float) -> float:
-        
         self._check_time()
+        alpha_start, beta_start = alpha, beta
+        key = self._transposition_key(state, depth)
+        cached = self._transposition_table.get(key)
+
+        if cached is not None:
+            value, bound = cached
+            if bound == "exact":
+                return value
+            if bound == "lower":
+                alpha = max(alpha, value)
+            else:
+                beta = min(beta, value)
+            if alpha >= beta:
+                return value
 
         if depth == 0 or state.is_done():
-            return self._evaluate(state)
+            value = self._evaluate(state)
+            self._store_transposition(key, value, alpha_start, beta_start)
+            return value
 
         actions = self._candidate_actions(state)
         
         if not actions:
-            return self._evaluate(state)
+            value = self._evaluate(state)
+            self._store_transposition(key, value, alpha_start, beta_start)
+            return value
         
         maximizing = state.active_player.id == self.id
         
@@ -145,18 +166,40 @@ class MyPlayer(PlayerQuoridor):
                 
                 if alpha >= beta:
                     break
+            self._store_transposition(key, value, alpha_start, beta_start)
             return value
 
         value = inf
         for _, child in successors:
             value = min(value, self._minimax(child, depth - 1, alpha, beta))
             beta = min(beta, value)
-            
-            beta = min(beta, value) # Propagate the beta value up the tree
-            
             if alpha >= beta:
                 break
+        self._store_transposition(key, value, alpha_start, beta_start)
         return value
+
+    def _transposition_key(self, state: GameStateQuoridor, depth: int):
+        rep = state.rep
+        return (
+            depth,
+            state.active_player.id,
+            tuple(sorted(rep.pawn_positions.items())),
+            rep.walls,
+            tuple(sorted(rep.remaining_walls.items())),
+            rep.dimension,
+        )
+
+    def _store_transposition(self, key, value: float,
+                             alpha_start: float, beta_start: float) -> None:
+        if len(self._transposition_table) >= self.MAX_TRANSPOSITION_ENTRIES:
+            return
+        if value <= alpha_start:
+            bound = "upper"
+        elif value >= beta_start:
+            bound = "lower"
+        else:
+            bound = "exact"
+        self._transposition_table[key] = value, bound
     
     def _get_fast_forward_move(self, state):
         own_player = next(player for player in state.players if player.id == self.id)
@@ -362,28 +405,40 @@ class MyPlayer(PlayerQuoridor):
 
     def _shortest_path_edges(self, state: GameStateQuoridor, player):
         start = state.rep.pawn_positions[player.id]
-        queue = [start]
-        previous = {start: None}
-        goal = None
+        goals = [
+            (player.get_goal_row(), col)
+            for col in range(state.rep.dimension)
+        ]
 
-        for position in queue:
-            if position[0] == player.get_goal_row():
-                goal = position
-                break
-            for neighbour in state._reachable_neighbours(position):
-                if neighbour not in previous:
-                    previous[neighbour] = position
-                    queue.append(neighbour)
+        def distances_from(sources):
+            distances = {source: 0 for source in sources}
+            queue = deque(sources)
+            while queue:
+                self._check_time()
+                position = queue.popleft()
+                for neighbour in state._reachable_neighbours(position):
+                    if neighbour not in distances:
+                        distances[neighbour] = distances[position] + 1
+                        queue.append(neighbour)
+            return distances
 
-        if goal is None:
+        from_start = distances_from([start])
+        reachable_goals = [goal for goal in goals if goal in from_start]
+        if not reachable_goals:
             return frozenset()
-
+        shortest_distance = min(from_start[goal] for goal in reachable_goals)
+        to_goal = distances_from(goals)
         edges = set()
-        position = goal
-        while previous[position] is not None:
-            parent = previous[position]
-            edges.add(frozenset((parent, position)))
-            position = parent
+
+        for position, distance in from_start.items():
+            self._check_time()
+            for neighbour in state._reachable_neighbours(position):
+                if (
+                    distance + 1 + to_goal.get(neighbour, inf)
+                    == shortest_distance
+                ):
+                    edges.add(frozenset((position, neighbour)))
+
         return frozenset(edges)
 
     def _wall_blocks_path(self, action: Action, state: GameStateQuoridor,
